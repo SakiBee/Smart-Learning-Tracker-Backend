@@ -57,6 +57,21 @@ if (app.Environment.IsDevelopment())
 });
 }
 
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowFrontend",
+        policy =>
+        {
+            policy.WithOrigins(
+                "http://localhost:3000",
+                "https://smart-learning-tracker-frontend-tbv.vercel.app"
+            )
+            .AllowAnyHeader()
+            .AllowAnyMethod()
+            .AllowCredentials();
+        });
+});
+
 app.UseCors("AllowFrontend");
 app.UseAuthentication();
 app.UseAuthorization();
