@@ -1,4 +1,4 @@
-# 📚 Smart Learning Tracker (SLT)
+# 📚 Recallify: AI-Powered Learning Tracker
 
 > **Transform passive reading into active knowledge management.**
 > A full-stack AI-powered application that helps you capture, summarize, organize, and revisit everything you learn online — with spaced repetition flashcards, team collaboration, reading mode, and more.
