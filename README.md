@@ -9,8 +9,8 @@
 
 | Service | URL |
 |---|---|
-| Frontend | `https://your-app.vercel.app` |
-| Backend API | `https://slt-backend.up.railway.app` |
+| Frontend | `https://smart-learning-tracker-frontend-tbv.vercel.app/register` |
+| Backend API | `https://smart-learning-tracker-backend-3.onrender.com/` |
 | API Docs | `https://slt-backend.up.railway.app/scalar/v1` |
 
 ---
