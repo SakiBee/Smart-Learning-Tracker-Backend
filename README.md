@@ -230,7 +230,7 @@ Most people consume enormous amounts of content daily — articles, LinkedIn pos
 ### DevOps & Deployment
 | Service | Purpose |
 |---|---|
-| **Railway** | Backend hosting + managed PostgreSQL |
+| **Render** | Backend hosting + managed PostgreSQL |
 | **Vercel** | Frontend hosting with CI/CD |
 | **GitHub** | Source control |
 | **Docker** | Container for backend deployment |
