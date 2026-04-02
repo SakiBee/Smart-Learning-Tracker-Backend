@@ -30,13 +30,19 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 builder.Services.AddAuthorization();
 builder.Services.AddInfrastructure(builder.Configuration);
 
-// CORS
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("AllowFrontend", policy =>
-        policy.WithOrigins("http://localhost:3000")
-              .AllowAnyHeader()
-              .AllowAnyMethod());
+    options.AddPolicy("AllowFrontend",
+        policy =>
+        {
+            policy.WithOrigins(
+                "http://localhost:3000",
+                "https://smart-learning-tracker-frontend-tbv.vercel.app"
+            )
+            .AllowAnyHeader()
+            .AllowAnyMethod()
+            .AllowCredentials();
+        });
 });
 
 var app = builder.Build();
@@ -56,21 +62,6 @@ if (app.Environment.IsDevelopment())
     });
 });
 }
-
-builder.Services.AddCors(options =>
-{
-    options.AddPolicy("AllowFrontend",
-        policy =>
-        {
-            policy.WithOrigins(
-                "http://localhost:3000",
-                "https://smart-learning-tracker-frontend-tbv.vercel.app"
-            )
-            .AllowAnyHeader()
-            .AllowAnyMethod()
-            .AllowCredentials();
-        });
-});
 
 app.UseCors("AllowFrontend");
 app.UseAuthentication();
