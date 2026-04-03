@@ -1,4 +1,4 @@
-# 📚 Smart Learning Tracker (SLT)
+# 📚 Recallify: AI-Powered Learning Tracker
 
 > **Transform passive reading into active knowledge management.**
 > A full-stack AI-powered application that helps you capture, summarize, organize, and revisit everything you learn online — with spaced repetition flashcards, team collaboration, reading mode, and more.
@@ -9,8 +9,8 @@
 
 | Service | URL |
 |---|---|
-| Frontend | `https://your-app.vercel.app` |
-| Backend API | `https://slt-backend.up.railway.app` |
+| Frontend | `https://smart-learning-tracker-frontend-tbv.vercel.app/register` |
+| Backend API | `https://smart-learning-tracker-backend-3.onrender.com/` |
 | API Docs | `https://slt-backend.up.railway.app/scalar/v1` |
 
 ---
@@ -230,7 +230,7 @@ Most people consume enormous amounts of content daily — articles, LinkedIn pos
 ### DevOps & Deployment
 | Service | Purpose |
 |---|---|
-| **Railway** | Backend hosting + managed PostgreSQL |
+| **Render** | Backend hosting + managed PostgreSQL |
 | **Vercel** | Frontend hosting with CI/CD |
 | **GitHub** | Source control |
 | **Docker** | Container for backend deployment |
