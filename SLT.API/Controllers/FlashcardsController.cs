@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc;
 using SLT.Application.DTOs;
 using SLT.Core.Entities;
 using SLT.Core.Interfaces;
+using SLT.Core.Specifications;
 
 namespace SLT.API.Controllers;
 
@@ -12,13 +13,13 @@ namespace SLT.API.Controllers;
 [Route("api/[controller]")]
 public class FlashcardsController : ControllerBase
 {
-    private readonly IFlashcardRepository _flashcardRepo;
-    private readonly ILearningEntryRepository _entryRepo;
+    private readonly IRepository<Flashcard> _flashcardRepo;
+    private readonly IRepository<LearningEntry> _entryRepo;
     private readonly IFlashcardGeneratorService _generator;
 
     public FlashcardsController(
-        IFlashcardRepository flashcardRepo,
-        ILearningEntryRepository entryRepo,
+        IRepository<Flashcard> flashcardRepo,
+        IRepository<LearningEntry> entryRepo,
         IFlashcardGeneratorService generator)
     {
         _flashcardRepo = flashcardRepo;
@@ -29,46 +30,45 @@ public class FlashcardsController : ControllerBase
     private Guid CurrentUserId =>
         Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
 
-    // GET all flashcards
     [HttpGet]
     public async Task<IActionResult> GetAll()
     {
-        var cards = await _flashcardRepo.GetByUserIdAsync(CurrentUserId);
+        var cards = await _flashcardRepo.ListAsync(
+            new FlashcardsByUserSpec(CurrentUserId));
         return Ok(cards.Select(MapToDto));
     }
 
-    // GET due for review
     [HttpGet("due")]
     public async Task<IActionResult> GetDue()
     {
-        var cards = await _flashcardRepo.GetDueForReviewAsync(CurrentUserId);
+        var cards = await _flashcardRepo.ListAsync(
+            new DueFlashcardsSpec(CurrentUserId));
         return Ok(cards.Select(MapToDto));
     }
 
-    // POST generate from entry
     [HttpPost("generate")]
     public async Task<IActionResult> Generate([FromBody] GenerateFlashcardsDto dto)
     {
-        var entry = await _entryRepo.GetByIdWithTagsAsync(dto.LearningEntryId);
-        if (entry == null || entry.UserId != CurrentUserId)
-            return NotFound();
+        var entry = await _entryRepo.GetEntityWithSpec(
+            new EntryByIdAndUserSpec(dto.LearningEntryId, CurrentUserId));
+
+        if (entry == null) return NotFound();
 
         if (string.IsNullOrWhiteSpace(entry.Summary))
             return BadRequest(new { message = "Entry needs a summary to generate flashcards." });
 
-        // Delete existing flashcards for this entry
-        var existing = await _flashcardRepo.GetByEntryIdAsync(dto.LearningEntryId, CurrentUserId);
+        // Remove existing flashcards for this entry
+        var existing = await _flashcardRepo.ListAsync(
+            new FlashcardsByEntrySpec(dto.LearningEntryId, CurrentUserId));
+
         foreach (var card in existing)
             _flashcardRepo.Remove(card);
 
-        // Generate new ones
         var generated = await _generator.GenerateAsync(
-            entry.Title,
-            entry.Summary ?? "",
-            entry.KeyPoints ?? "");
+            entry.Title, entry.Summary ?? "", entry.KeyPoints ?? "");
 
         if (!generated.Any())
-            return BadRequest(new { message = "Could not generate flashcards. Try adding a summary first." });
+            return BadRequest(new { message = "Could not generate flashcards." });
 
         var flashcards = generated.Select(g => new Flashcard
         {
@@ -86,13 +86,13 @@ public class FlashcardsController : ControllerBase
         return Ok(flashcards.Select(MapToDto));
     }
 
-    // POST create manual flashcard
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] CreateFlashcardDto dto)
     {
-        var entry = await _entryRepo.GetByIdAsync(dto.LearningEntryId);
-        if (entry == null || entry.UserId != CurrentUserId)
-            return NotFound();
+        var entry = await _entryRepo.GetEntityWithSpec(
+            new EntryByIdAndUserSpec(dto.LearningEntryId, CurrentUserId));
+
+        if (entry == null) return NotFound();
 
         var card = new Flashcard
         {
@@ -108,56 +108,55 @@ public class FlashcardsController : ControllerBase
         return Ok(MapToDto(card));
     }
 
-    // POST review a card (SM-2 spaced repetition)
     [HttpPost("{id:guid}/review")]
-    public async Task<IActionResult> Review(Guid id, [FromBody] ReviewFlashcardDto dto)
+    public async Task<IActionResult> Review(
+        Guid id, [FromBody] ReviewFlashcardDto dto)
     {
-        var card = await _flashcardRepo.GetByIdAsync(id);
-        if (card == null || card.UserId != CurrentUserId)
-            return NotFound();
+        var card = await _flashcardRepo.GetEntityWithSpec(
+            new FlashcardByIdAndUserSpec(id, CurrentUserId));
+
+        if (card == null) return NotFound();
 
         card.TimesReviewed++;
         card.LastReviewedAt = DateTime.UtcNow;
 
-        if (dto.Rating >= 2) // Good or Easy
+        if (dto.Rating >= 2)
         {
             card.TimesCorrect++;
-
-            // SM-2 Algorithm
-            var ease = card.EaseFactor + (int)((0.1 - (3 - dto.Rating) * (0.08 + (3 - dto.Rating) * 0.02)) * 1000);
+            var ease = card.EaseFactor +
+                (int)((0.1 - (3 - dto.Rating) * (0.08 + (3 - dto.Rating) * 0.02)) * 1000);
             card.EaseFactor = Math.Max(130, ease);
-
-            if (card.Interval == 1)
-                card.Interval = 6;
-            else
-                card.Interval = (int)Math.Round(card.Interval * (card.EaseFactor / 100.0));
-
+            card.Interval = card.Interval == 1
+                ? 6
+                : (int)Math.Round(card.Interval * (card.EaseFactor / 100.0));
             card.NextReviewAt = DateTime.UtcNow.AddDays(card.Interval);
         }
-        else // Again or Hard
+        else
         {
             card.Interval = 1;
             card.NextReviewAt = dto.Rating == 0
-                ? DateTime.UtcNow.AddMinutes(10)  // Again → review in 10 min
-                : DateTime.UtcNow.AddDays(1);     // Hard → review tomorrow
+                ? DateTime.UtcNow.AddMinutes(10)
+                : DateTime.UtcNow.AddDays(1);
         }
 
+        card.UpdatedAt = DateTime.UtcNow;
         _flashcardRepo.Update(card);
         await _flashcardRepo.SaveChangesAsync();
 
         return Ok(MapToDto(card));
     }
 
-    // DELETE
     [HttpDelete("{id:guid}")]
     public async Task<IActionResult> Delete(Guid id)
     {
-        var card = await _flashcardRepo.GetByIdAsync(id);
-        if (card == null || card.UserId != CurrentUserId)
-            return NotFound();
+        var card = await _flashcardRepo.GetEntityWithSpec(
+            new FlashcardByIdAndUserSpec(id, CurrentUserId));
+
+        if (card == null) return NotFound();
 
         _flashcardRepo.Remove(card);
         await _flashcardRepo.SaveChangesAsync();
+
         return NoContent();
     }
 

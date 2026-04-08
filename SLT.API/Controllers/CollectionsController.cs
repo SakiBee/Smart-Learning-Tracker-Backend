@@ -4,7 +4,7 @@ using Microsoft.AspNetCore.Mvc;
 using SLT.Application.DTOs;
 using SLT.Core.Entities;
 using SLT.Core.Interfaces;
-using Microsoft.EntityFrameworkCore;
+using SLT.Core.Specifications;
 
 namespace SLT.API.Controllers;
 
@@ -13,49 +13,54 @@ namespace SLT.API.Controllers;
 [Route("api/[controller]")]
 public class CollectionsController : ControllerBase
 {
-    private readonly ICollectionRepository _collectionRepo;
-    private readonly ILearningEntryRepository _entryRepo;
+    private readonly IRepository<Collection> _collectionRepo;
+    private readonly IRepository<CollectionEntry> _collectionEntryRepo;
+    private readonly IRepository<LearningEntry> _entryRepo;
 
     public CollectionsController(
-        ICollectionRepository collectionRepo,
-        ILearningEntryRepository entryRepo)
+        IRepository<Collection> collectionRepo,
+        IRepository<CollectionEntry> collectionEntryRepo,
+        IRepository<LearningEntry> entryRepo)
     {
         _collectionRepo = collectionRepo;
+        _collectionEntryRepo = collectionEntryRepo;
         _entryRepo = entryRepo;
     }
 
     private Guid CurrentUserId =>
         Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
 
-    // GET all collections
     [HttpGet]
     public async Task<IActionResult> GetAll()
     {
-        var collections = await _collectionRepo.GetByUserIdAsync(CurrentUserId);
+        var collections = await _collectionRepo.ListAsync(
+            new CollectionsByUserSpec(CurrentUserId));
         return Ok(collections.Select(MapToDto));
     }
 
-    // GET single collection
     [HttpGet("{id:guid}")]
     public async Task<IActionResult> GetById(Guid id)
     {
-        var collection = await _collectionRepo.GetByIdWithEntriesAsync(id);
+        var collection = await _collectionRepo.GetEntityWithSpec(
+            new CollectionWithEntriesSpec(id));
+
         if (collection == null || collection.UserId != CurrentUserId)
             return NotFound();
+
         return Ok(MapToDto(collection));
     }
 
-    // GET public collection by share slug (no auth)
     [HttpGet("shared/{slug}")]
     [AllowAnonymous]
     public async Task<IActionResult> GetShared(string slug)
     {
-        var collection = await _collectionRepo.GetByShareSlugAsync(slug);
+        var collection = await _collectionRepo.GetEntityWithSpec(
+            new PublicCollectionBySlugSpec(slug));
+
         if (collection == null) return NotFound();
         return Ok(MapToDto(collection));
     }
 
-    // POST create collection
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] CreateCollectionDto dto)
     {
@@ -70,22 +75,23 @@ public class CollectionsController : ControllerBase
         await _collectionRepo.AddAsync(collection);
         await _collectionRepo.SaveChangesAsync();
 
-        return CreatedAtAction(nameof(GetById), new { id = collection.Id }, MapToDto(collection));
+        return CreatedAtAction(nameof(GetById),
+            new { id = collection.Id }, MapToDto(collection));
     }
 
-    // PUT update collection
     [HttpPut("{id:guid}")]
-    public async Task<IActionResult> Update(Guid id, [FromBody] UpdateCollectionDto dto)
+    public async Task<IActionResult> Update(
+        Guid id, [FromBody] UpdateCollectionDto dto)
     {
-        var collection = await _collectionRepo.GetByIdAsync(id);
-        if (collection == null || collection.UserId != CurrentUserId)
-            return NotFound();
+        var collection = await _collectionRepo.GetEntityWithSpec(
+            new CollectionByIdAndUserSpec(id, CurrentUserId));
+
+        if (collection == null) return NotFound();
 
         if (dto.Name != null) collection.Name = dto.Name.Trim();
         if (dto.Description != null) collection.Description = dto.Description.Trim();
         if (dto.Emoji != null) collection.Emoji = dto.Emoji;
 
-        // Toggle public sharing
         if (dto.IsPublic.HasValue)
         {
             collection.IsPublic = dto.IsPublic.Value;
@@ -93,73 +99,70 @@ public class CollectionsController : ControllerBase
                 collection.ShareSlug = GenerateSlug(collection.Name);
         }
 
+        collection.UpdatedAt = DateTime.UtcNow;
         _collectionRepo.Update(collection);
         await _collectionRepo.SaveChangesAsync();
 
         return Ok(MapToDto(collection));
     }
 
-    // DELETE collection
     [HttpDelete("{id:guid}")]
     public async Task<IActionResult> Delete(Guid id)
     {
-        var collection = await _collectionRepo.GetByIdAsync(id);
-        if (collection == null || collection.UserId != CurrentUserId)
-            return NotFound();
+        var collection = await _collectionRepo.GetEntityWithSpec(
+            new CollectionByIdAndUserSpec(id, CurrentUserId));
+
+        if (collection == null) return NotFound();
 
         _collectionRepo.Remove(collection);
         await _collectionRepo.SaveChangesAsync();
         return NoContent();
     }
 
-    // POST add entry to collection
     [HttpPost("{id:guid}/entries")]
-    public async Task<IActionResult> AddEntry(Guid id, [FromBody] AddToCollectionDto dto)
+    public async Task<IActionResult> AddEntry(
+        Guid id, [FromBody] AddToCollectionDto dto)
     {
-        var collection = await _collectionRepo.GetByIdAsync(id);
-        if (collection == null || collection.UserId != CurrentUserId)
-            return NotFound();
+        var collection = await _collectionRepo.GetEntityWithSpec(
+            new CollectionByIdAndUserSpec(id, CurrentUserId));
 
-        var entry = await _entryRepo.GetByIdAsync(dto.LearningEntryId);
-        if (entry == null || entry.UserId != CurrentUserId)
+        if (collection == null) return NotFound();
+
+        var entry = await _entryRepo.GetEntityWithSpec(
+            new EntryByIdAndUserSpec(dto.LearningEntryId, CurrentUserId));
+
+        if (entry == null)
             return NotFound(new { message = "Entry not found." });
 
-        var exists = await _collectionRepo.EntryExistsInCollectionAsync(id, dto.LearningEntryId);
+        var exists = await _collectionEntryRepo.AnyAsync(
+            new CollectionEntryExistsSpec(id, dto.LearningEntryId));
+
         if (exists)
             return Conflict(new { message = "Entry already in this collection." });
 
-        var context = HttpContext.RequestServices
-            .GetRequiredService<SLT.Infrastructure.Data.AppDbContext>();
-
-        await context.CollectionEntries.AddAsync(new CollectionEntry
+        await _collectionEntryRepo.AddAsync(new CollectionEntry
         {
             CollectionId = id,
             LearningEntryId = dto.LearningEntryId
         });
-        await context.SaveChangesAsync();
 
+        await _collectionEntryRepo.SaveChangesAsync();
         return Ok(new { message = "Added to collection." });
     }
 
-    // DELETE remove entry from collection
     [HttpDelete("{id:guid}/entries/{entryId:guid}")]
     public async Task<IActionResult> RemoveEntry(Guid id, Guid entryId)
     {
-        var context = HttpContext.RequestServices
-            .GetRequiredService<SLT.Infrastructure.Data.AppDbContext>();
-
-        var collectionEntry = await context.CollectionEntries
-            .FirstOrDefaultAsync(ce => ce.CollectionId == id && ce.LearningEntryId == entryId);
+        var collectionEntry = await _collectionEntryRepo.GetEntityWithSpec(
+            new CollectionEntryByIdsSpec(id, entryId));
 
         if (collectionEntry == null) return NotFound();
 
-        context.CollectionEntries.Remove(collectionEntry);
-        await context.SaveChangesAsync();
-
+        _collectionEntryRepo.Remove(collectionEntry);
+        await _collectionEntryRepo.SaveChangesAsync();
         return NoContent();
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
     private static CollectionDto MapToDto(Collection c) => new()
     {
         Id = c.Id,
@@ -182,12 +185,6 @@ public class CollectionsController : ControllerBase
         }).ToList() ?? new()
     };
 
-    private static string GenerateSlug(string name)
-    {
-        var slug = name.ToLower()
-            .Replace(" ", "-")
-            .Replace("'", "")
-            .Replace("\"", "");
-        return $"{slug}-{Guid.NewGuid().ToString()[..6]}";
-    }
+    private static string GenerateSlug(string name) =>
+        $"{name.ToLower().Replace(" ", "-").Replace("'", "")}-{Guid.NewGuid().ToString()[..6]}";
 }

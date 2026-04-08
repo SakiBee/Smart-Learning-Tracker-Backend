@@ -4,47 +4,49 @@ using Microsoft.AspNetCore.Mvc;
 using SLT.Application.DTOs;
 using SLT.Core.Entities;
 using SLT.Core.Interfaces;
+using SLT.Core.Specifications;
 
 namespace SLT.API.Controllers;
 
 [ApiController]
-[Authorize]                          // 👈 Protect all endpoints
+[Authorize]
 [Route("api/[controller]")]
 public class LearningEntriesController : ControllerBase
 {
-    private readonly ILearningEntryRepository _repository;
+    private readonly IRepository<LearningEntry> _entryRepo;
 
-    public LearningEntriesController(ILearningEntryRepository repository)
+    public LearningEntriesController(IRepository<LearningEntry> entryRepo)
     {
-        _repository = repository;
+        _entryRepo = entryRepo;
     }
 
-    // 👇 Replaces the hardcoded _tempUserId
     private Guid CurrentUserId =>
         Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
 
     [HttpGet]
     public async Task<IActionResult> GetAll()
     {
-        var entries = await _repository.GetByUserIdAsync(CurrentUserId);
-        var result = entries.Select(MapToDto);
-        return Ok(result);
+        var entries = await _entryRepo.ListAsync(
+            new EntriesByUserSpec(CurrentUserId));
+        return Ok(entries.Select(MapToDto));
     }
 
     [HttpGet("{id:guid}")]
     public async Task<IActionResult> GetById(Guid id)
     {
-        var entry = await _repository.GetByIdWithTagsAsync(id);
-        if (entry == null || entry.UserId != CurrentUserId)
-            return NotFound();
+        var entry = await _entryRepo.GetEntityWithSpec(
+            new EntryByIdAndUserSpec(id, CurrentUserId));
 
+        if (entry == null) return NotFound();
         return Ok(MapToDto(entry));
     }
 
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] CreateLearningEntryDto dto)
     {
-        var urlExists = await _repository.UrlExistsForUserAsync(dto.Url, CurrentUserId);
+        var urlExists = await _entryRepo.AnyAsync(
+            new EntryUrlExistsSpec(dto.Url, CurrentUserId));
+
         if (urlExists)
             return Conflict(new { message = "This URL has already been saved." });
 
@@ -59,21 +61,24 @@ public class LearningEntriesController : ControllerBase
             ContentType = dto.ContentType,
             Priority = dto.Priority,
             IsReadLater = dto.IsReadLater,
-            UserId = CurrentUserId       // 👈 Real user from JWT
+            UserId = CurrentUserId
         };
 
-        await _repository.AddAsync(entry);
-        await _repository.SaveChangesAsync();
+        await _entryRepo.AddAsync(entry);
+        await _entryRepo.SaveChangesAsync();
 
-        return CreatedAtAction(nameof(GetById), new { id = entry.Id }, MapToDto(entry));
+        return CreatedAtAction(nameof(GetById),
+            new { id = entry.Id }, MapToDto(entry));
     }
 
     [HttpPut("{id:guid}")]
-    public async Task<IActionResult> Update(Guid id, [FromBody] UpdateLearningEntryDto dto)
+    public async Task<IActionResult> Update(
+        Guid id, [FromBody] UpdateLearningEntryDto dto)
     {
-        var entry = await _repository.GetByIdWithTagsAsync(id);
-        if (entry == null || entry.UserId != CurrentUserId)
-            return NotFound();
+        var entry = await _entryRepo.GetEntityWithSpec(
+            new EntryByIdAndUserSpec(id, CurrentUserId));
+
+        if (entry == null) return NotFound();
 
         if (dto.Title != null) entry.Title = dto.Title;
         if (dto.Summary != null) entry.Summary = dto.Summary;
@@ -82,9 +87,10 @@ public class LearningEntriesController : ControllerBase
         if (dto.IsReadLater.HasValue) entry.IsReadLater = dto.IsReadLater.Value;
         if (dto.IsFavorite.HasValue) entry.IsFavorite = dto.IsFavorite.Value;
         if (dto.IsRead.HasValue) entry.IsRead = dto.IsRead.Value;
+        entry.UpdatedAt = DateTime.UtcNow;
 
-        _repository.Update(entry);
-        await _repository.SaveChangesAsync();
+        _entryRepo.Update(entry);
+        await _entryRepo.SaveChangesAsync();
 
         return Ok(MapToDto(entry));
     }
@@ -92,12 +98,13 @@ public class LearningEntriesController : ControllerBase
     [HttpDelete("{id:guid}")]
     public async Task<IActionResult> Delete(Guid id)
     {
-        var entry = await _repository.GetByIdAsync(id);
-        if (entry == null || entry.UserId != CurrentUserId)
-            return NotFound();
+        var entry = await _entryRepo.GetEntityWithSpec(
+            new EntryByIdAndUserSpec(id, CurrentUserId));
 
-        _repository.Remove(entry);
-        await _repository.SaveChangesAsync();
+        if (entry == null) return NotFound();
+
+        _entryRepo.Remove(entry);
+        await _entryRepo.SaveChangesAsync();
 
         return NoContent();
     }

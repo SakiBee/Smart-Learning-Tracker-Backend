@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc;
 using SLT.Application.DTOs;
 using SLT.Core.Entities;
 using SLT.Core.Interfaces;
+using SLT.Core.Specifications;
 
 namespace SLT.API.Controllers;
 
@@ -12,12 +13,12 @@ namespace SLT.API.Controllers;
 [Route("api/[controller]")]
 public class QuotesController : ControllerBase
 {
-    private readonly IQuoteRepository _quoteRepo;
-    private readonly ILearningEntryRepository _entryRepo;
+    private readonly IRepository<Quote> _quoteRepo;
+    private readonly IRepository<LearningEntry> _entryRepo;
 
     public QuotesController(
-        IQuoteRepository quoteRepo,
-        ILearningEntryRepository entryRepo)
+        IRepository<Quote> quoteRepo,
+        IRepository<LearningEntry> entryRepo)
     {
         _quoteRepo = quoteRepo;
         _entryRepo = entryRepo;
@@ -29,23 +30,26 @@ public class QuotesController : ControllerBase
     [HttpGet]
     public async Task<IActionResult> GetAll()
     {
-        var quotes = await _quoteRepo.GetByUserIdAsync(CurrentUserId);
+        var quotes = await _quoteRepo.ListAsync(
+            new QuotesByUserSpec(CurrentUserId));
         return Ok(quotes.Select(MapToDto));
     }
 
     [HttpGet("entry/{entryId:guid}")]
     public async Task<IActionResult> GetByEntry(Guid entryId)
     {
-        var quotes = await _quoteRepo.GetByEntryIdAsync(entryId, CurrentUserId);
+        var quotes = await _quoteRepo.ListAsync(
+            new QuotesByEntrySpec(entryId, CurrentUserId));
         return Ok(quotes.Select(MapToDto));
     }
 
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] CreateQuoteDto dto)
     {
-        var entry = await _entryRepo.GetByIdAsync(dto.LearningEntryId);
-        if (entry == null || entry.UserId != CurrentUserId)
-            return NotFound();
+        var entry = await _entryRepo.GetEntityWithSpec(
+            new EntryByIdAndUserSpec(dto.LearningEntryId, CurrentUserId));
+
+        if (entry == null) return NotFound();
 
         if (string.IsNullOrWhiteSpace(dto.Text))
             return BadRequest(new { message = "Quote text is required." });
@@ -66,14 +70,17 @@ public class QuotesController : ControllerBase
     }
 
     [HttpPut("{id:guid}")]
-    public async Task<IActionResult> Update(Guid id, [FromBody] UpdateQuoteDto dto)
+    public async Task<IActionResult> Update(
+        Guid id, [FromBody] UpdateQuoteDto dto)
     {
-        var quote = await _quoteRepo.GetByIdAsync(id);
-        if (quote == null || quote.UserId != CurrentUserId)
-            return NotFound();
+        var quote = await _quoteRepo.GetEntityWithSpec(
+            new QuoteByIdAndUserSpec(id, CurrentUserId));
+
+        if (quote == null) return NotFound();
 
         if (dto.Note != null) quote.Note = dto.Note.Trim();
         if (dto.Color != null) quote.Color = dto.Color;
+        quote.UpdatedAt = DateTime.UtcNow;
 
         _quoteRepo.Update(quote);
         await _quoteRepo.SaveChangesAsync();
@@ -84,13 +91,13 @@ public class QuotesController : ControllerBase
     [HttpDelete("{id:guid}")]
     public async Task<IActionResult> Delete(Guid id)
     {
-        var quote = await _quoteRepo.GetByIdAsync(id);
-        if (quote == null || quote.UserId != CurrentUserId)
-            return NotFound();
+        var quote = await _quoteRepo.GetEntityWithSpec(
+            new QuoteByIdAndUserSpec(id, CurrentUserId));
+
+        if (quote == null) return NotFound();
 
         _quoteRepo.Remove(quote);
         await _quoteRepo.SaveChangesAsync();
-
         return NoContent();
     }
 

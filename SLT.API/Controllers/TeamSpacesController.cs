@@ -1,11 +1,10 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
 using SLT.Application.DTOs;
 using SLT.Core.Entities;
 using SLT.Core.Interfaces;
-using SLT.Infrastructure.Data;
+using SLT.Core.Specifications;
 
 namespace SLT.API.Controllers;
 
@@ -14,45 +13,49 @@ namespace SLT.API.Controllers;
 [Route("api/[controller]")]
 public class TeamSpacesController : ControllerBase
 {
-    private readonly AppDbContext _context;
-    private readonly ILearningEntryRepository _entryRepo;
+    private readonly IRepository<TeamSpace> _teamRepo;
+    private readonly IRepository<TeamMember> _memberRepo;
+    private readonly IRepository<TeamEntry> _teamEntryRepo;
+    private readonly IRepository<EntryComment> _commentRepo;
+    private readonly IRepository<LearningEntry> _entryRepo;
+    private readonly IRepository<User> _userRepo;
 
-    public TeamSpacesController(AppDbContext context, ILearningEntryRepository entryRepo)
+    public TeamSpacesController(
+        IRepository<TeamSpace> teamRepo,
+        IRepository<TeamMember> memberRepo,
+        IRepository<TeamEntry> teamEntryRepo,
+        IRepository<EntryComment> commentRepo,
+        IRepository<LearningEntry> entryRepo,
+        IRepository<User> userRepo)
     {
-        _context = context;
+        _teamRepo = teamRepo;
+        _memberRepo = memberRepo;
+        _teamEntryRepo = teamEntryRepo;
+        _commentRepo = commentRepo;
         _entryRepo = entryRepo;
+        _userRepo = userRepo;
     }
 
     private Guid CurrentUserId =>
         Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
 
-    // GET my team spaces
     [HttpGet]
     public async Task<IActionResult> GetAll()
     {
-        var memberships = await _context.TeamMembers
-            .Include(m => m.TeamSpace)
-                .ThenInclude(t => t.Members)
-                    .ThenInclude(m => m.User)
-            .Include(m => m.TeamSpace)
-                .ThenInclude(t => t.SharedEntries)
-            .Where(m => m.UserId == CurrentUserId)
-            .ToListAsync();
+        var memberships = await _memberRepo.ListAsync(
+            new TeamMembershipsByUserSpec(CurrentUserId));
 
-        var result = memberships.Select(m => MapToDto(m.TeamSpace, CurrentUserId));
+        var result = memberships.Select(m =>
+            MapToDto(m.TeamSpace, CurrentUserId));
+
         return Ok(result);
     }
 
-    // GET single team
     [HttpGet("{id:guid}")]
     public async Task<IActionResult> GetById(Guid id)
     {
-        var team = await _context.TeamSpaces
-            .Include(t => t.Members).ThenInclude(m => m.User)
-            .Include(t => t.SharedEntries).ThenInclude(e => e.LearningEntry).ThenInclude(le => le.Tags)
-            .Include(t => t.SharedEntries).ThenInclude(e => e.SharedByUser)
-            .Include(t => t.SharedEntries).ThenInclude(e => e.Comments).ThenInclude(c => c.User)
-            .FirstOrDefaultAsync(t => t.Id == id);
+        var team = await _teamRepo.GetEntityWithSpec(
+            new TeamWithDetailsSpec(id));
 
         if (team == null) return NotFound();
 
@@ -64,12 +67,10 @@ public class TeamSpacesController : ControllerBase
             team = MapToDto(team, CurrentUserId),
             entries = team.SharedEntries
                 .OrderByDescending(e => e.CreatedAt)
-                .Select(e => MapEntryToDto(e))
-                .ToList()
+                .Select(MapEntryToDto).ToList()
         });
     }
 
-    // POST create team space
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] CreateTeamSpaceDto dto)
     {
@@ -82,132 +83,116 @@ public class TeamSpacesController : ControllerBase
             InviteCode = GenerateInviteCode()
         };
 
-        _context.TeamSpaces.Add(team);
+        await _teamRepo.AddAsync(team);
+        await _teamRepo.SaveChangesAsync();
 
-        // Add creator as owner member
-        _context.TeamMembers.Add(new TeamMember
+        await _memberRepo.AddAsync(new TeamMember
         {
             TeamSpaceId = team.Id,
             UserId = CurrentUserId,
             Role = TeamRole.Owner
         });
+        await _memberRepo.SaveChangesAsync();
 
-        await _context.SaveChangesAsync();
         return Ok(new { id = team.Id, inviteCode = team.InviteCode });
     }
 
-    // POST join by invite code
     [HttpPost("join")]
     public async Task<IActionResult> Join([FromBody] JoinTeamDto dto)
     {
-        var team = await _context.TeamSpaces
-            .Include(t => t.Members)
-            .FirstOrDefaultAsync(t => t.InviteCode == dto.InviteCode.Trim().ToUpper());
+        var team = await _teamRepo.GetEntityWithSpec(
+            new TeamByInviteCodeSpec(dto.InviteCode));
 
         if (team == null)
             return NotFound(new { message = "Invalid invite code." });
 
-        var alreadyMember = team.Members.Any(m => m.UserId == CurrentUserId);
+        var alreadyMember = await _memberRepo.AnyAsync(
+            new TeamMemberExistsSpec(team.Id, CurrentUserId));
+
         if (alreadyMember)
             return Conflict(new { message = "You are already a member." });
 
-        _context.TeamMembers.Add(new TeamMember
+        await _memberRepo.AddAsync(new TeamMember
         {
             TeamSpaceId = team.Id,
             UserId = CurrentUserId,
             Role = TeamRole.Member
         });
 
-        await _context.SaveChangesAsync();
+        await _memberRepo.SaveChangesAsync();
         return Ok(new { message = $"Joined {team.Name}!", teamId = team.Id });
     }
 
-    // POST regenerate invite code
-    [HttpPost("{id:guid}/regenerate-code")]
-    public async Task<IActionResult> RegenerateCode(Guid id)
-    {
-        var team = await _context.TeamSpaces.FindAsync(id);
-        if (team == null || team.OwnerId != CurrentUserId) return Forbid();
-
-        team.InviteCode = GenerateInviteCode();
-        await _context.SaveChangesAsync();
-
-        return Ok(new { inviteCode = team.InviteCode });
-    }
-
-    // POST share entry to team
     [HttpPost("{id:guid}/entries")]
-    public async Task<IActionResult> ShareEntry(Guid id, [FromBody] ShareEntryToTeamDto dto)
+    public async Task<IActionResult> ShareEntry(
+        Guid id, [FromBody] ShareEntryToTeamDto dto)
     {
-        var isMember = await _context.TeamMembers
-            .AnyAsync(m => m.TeamSpaceId == id && m.UserId == CurrentUserId);
+        var isMember = await _memberRepo.AnyAsync(
+            new TeamMemberExistsSpec(id, CurrentUserId));
         if (!isMember) return Forbid();
 
-        var entry = await _entryRepo.GetByIdAsync(dto.LearningEntryId);
-        if (entry == null || entry.UserId != CurrentUserId)
-            return NotFound(new { message = "Entry not found." });
+        var entry = await _entryRepo.GetEntityWithSpec(
+            new EntryByIdAndUserSpec(dto.LearningEntryId, CurrentUserId));
+        if (entry == null) return NotFound(new { message = "Entry not found." });
 
-        var alreadyShared = await _context.TeamEntries
-            .AnyAsync(te => te.TeamSpaceId == id && te.LearningEntryId == dto.LearningEntryId);
+        var alreadyShared = await _teamEntryRepo.AnyAsync(
+            new TeamEntryExistsSpec(id, dto.LearningEntryId));
         if (alreadyShared)
             return Conflict(new { message = "Already shared to this team." });
 
-        var teamEntry = new TeamEntry
+        await _teamEntryRepo.AddAsync(new TeamEntry
         {
             TeamSpaceId = id,
             LearningEntryId = dto.LearningEntryId,
             SharedByUserId = CurrentUserId,
             SharedNote = dto.SharedNote?.Trim()
-        };
+        });
 
-        _context.TeamEntries.Add(teamEntry);
-        await _context.SaveChangesAsync();
-
+        await _teamEntryRepo.SaveChangesAsync();
         return Ok(new { message = "Shared to team!" });
     }
 
-    // DELETE remove entry from team
-    [HttpDelete("{id:guid}/entries/{entryId:guid}")]
-    public async Task<IActionResult> RemoveEntry(Guid id, Guid entryId)
+    [HttpDelete("{id:guid}/entries/{teamEntryId:guid}")]
+    public async Task<IActionResult> RemoveEntry(Guid id, Guid teamEntryId)
     {
-        var teamEntry = await _context.TeamEntries
-            .FirstOrDefaultAsync(te => te.Id == entryId && te.TeamSpaceId == id);
+        var teamEntry = await _teamEntryRepo.GetEntityWithSpec(
+            new TeamEntryByIdsSpec(id, teamEntryId));
 
         if (teamEntry == null) return NotFound();
 
-        var isOwner = await _context.TeamSpaces
-            .AnyAsync(t => t.Id == id && t.OwnerId == CurrentUserId);
+        var isOwner = await _teamRepo.AnyAsync(
+            new TeamByIdAndOwnerSpec(id, CurrentUserId));
 
         if (teamEntry.SharedByUserId != CurrentUserId && !isOwner)
             return Forbid();
 
-        _context.TeamEntries.Remove(teamEntry);
-        await _context.SaveChangesAsync();
+        _teamEntryRepo.Remove(teamEntry);
+        await _teamEntryRepo.SaveChangesAsync();
         return NoContent();
     }
 
-    // POST add comment
-    [HttpPost("{id:guid}/entries/{entryId:guid}/comments")]
-    public async Task<IActionResult> AddComment(Guid id, Guid entryId, [FromBody] AddCommentDto dto)
+    [HttpPost("{id:guid}/entries/{teamEntryId:guid}/comments")]
+    public async Task<IActionResult> AddComment(
+        Guid id, Guid teamEntryId, [FromBody] AddCommentDto dto)
     {
-        var isMember = await _context.TeamMembers
-            .AnyAsync(m => m.TeamSpaceId == id && m.UserId == CurrentUserId);
+        var isMember = await _memberRepo.AnyAsync(
+            new TeamMemberExistsSpec(id, CurrentUserId));
         if (!isMember) return Forbid();
 
-        var teamEntry = await _context.TeamEntries.FindAsync(entryId);
+        var teamEntry = await _teamEntryRepo.GetByIdAsync(teamEntryId);
         if (teamEntry == null) return NotFound();
 
-        var user = await _context.Users.FindAsync(CurrentUserId);
+        var user = await _userRepo.GetByIdAsync(CurrentUserId);
 
         var comment = new EntryComment
         {
             Text = dto.Text.Trim(),
-            TeamEntryId = entryId,
+            TeamEntryId = teamEntryId,
             UserId = CurrentUserId
         };
 
-        _context.EntryComments.Add(comment);
-        await _context.SaveChangesAsync();
+        await _commentRepo.AddAsync(comment);
+        await _commentRepo.SaveChangesAsync();
 
         return Ok(new CommentDto
         {
@@ -219,40 +204,36 @@ public class TeamSpacesController : ControllerBase
         });
     }
 
-    // DELETE remove member
     [HttpDelete("{id:guid}/members/{userId:guid}")]
     public async Task<IActionResult> RemoveMember(Guid id, Guid userId)
     {
-        var team = await _context.TeamSpaces.FindAsync(id);
+        var team = await _teamRepo.GetByIdAsync(id);
         if (team == null) return NotFound();
 
         if (team.OwnerId != CurrentUserId && userId != CurrentUserId)
             return Forbid();
 
-        var member = await _context.TeamMembers
-            .FirstOrDefaultAsync(m => m.TeamSpaceId == id && m.UserId == userId);
-
+        var member = await _memberRepo.GetEntityWithSpec(
+            new TeamMemberByIdsSpec(id, userId));
         if (member == null) return NotFound();
 
-        _context.TeamMembers.Remove(member);
-        await _context.SaveChangesAsync();
+        _memberRepo.Remove(member);
+        await _memberRepo.SaveChangesAsync();
         return NoContent();
     }
 
-    // DELETE team space (owner only)
     [HttpDelete("{id:guid}")]
     public async Task<IActionResult> Delete(Guid id)
     {
-        var team = await _context.TeamSpaces.FindAsync(id);
-        if (team == null || team.OwnerId != CurrentUserId)
-            return Forbid();
+        var team = await _teamRepo.GetEntityWithSpec(
+            new TeamByIdAndOwnerSpec(id, CurrentUserId));
+        if (team == null) return Forbid();
 
-        _context.TeamSpaces.Remove(team);
-        await _context.SaveChangesAsync();
+        _teamRepo.Remove(team);
+        await _teamRepo.SaveChangesAsync();
         return NoContent();
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
     private static TeamSpaceDto MapToDto(TeamSpace t, Guid currentUserId) => new()
     {
         Id = t.Id,

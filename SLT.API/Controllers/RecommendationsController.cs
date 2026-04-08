@@ -2,7 +2,9 @@ using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using SLT.Application.DTOs;
+using SLT.Core.Entities;
 using SLT.Core.Interfaces;
+using SLT.Core.Specifications;
 
 namespace SLT.API.Controllers;
 
@@ -11,9 +13,9 @@ namespace SLT.API.Controllers;
 [Route("api/[controller]")]
 public class RecommendationsController : ControllerBase
 {
-    private readonly ILearningEntryRepository _entryRepo;
+    private readonly IRepository<LearningEntry> _entryRepo;
 
-    public RecommendationsController(ILearningEntryRepository entryRepo)
+    public RecommendationsController(IRepository<LearningEntry> entryRepo)
     {
         _entryRepo = entryRepo;
     }
@@ -21,31 +23,25 @@ public class RecommendationsController : ControllerBase
     private Guid CurrentUserId =>
         Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
 
-    // GET recommendations for a specific entry
     [HttpGet("entry/{entryId:guid}")]
     public async Task<IActionResult> GetForEntry(Guid entryId)
     {
-        var allEntries = (await _entryRepo.GetByUserIdAsync(CurrentUserId)).ToList();
-        var target = allEntries.FirstOrDefault(e => e.Id == entryId);
+        var allEntries = (await _entryRepo.ListAsync(
+            new EntriesByUserSpec(CurrentUserId))).ToList();
 
+        var target = allEntries.FirstOrDefault(e => e.Id == entryId);
         if (target == null) return NotFound();
 
         var targetTags = target.Tags.Select(t => t.Name).ToHashSet();
-        if (!targetTags.Any())
-            return Ok(new List<RecommendationDto>());
+        if (!targetTags.Any()) return Ok(new List<RecommendationDto>());
 
-        var recommendations = allEntries
+        var result = allEntries
             .Where(e => e.Id != entryId)
             .Select(e =>
             {
-                var entryTags = e.Tags.Select(t => t.Name).ToHashSet();
-                var matched = targetTags.Intersect(entryTags).ToList();
-                return new
-                {
-                    Entry = e,
-                    MatchedTags = matched,
-                    Score = matched.Count
-                };
+                var matched = targetTags
+                    .Intersect(e.Tags.Select(t => t.Name)).ToList();
+                return new { Entry = e, MatchedTags = matched, Score = matched.Count };
             })
             .Where(x => x.Score > 0)
             .OrderByDescending(x => x.Score)
@@ -60,19 +56,17 @@ public class RecommendationsController : ControllerBase
                 MatchScore = x.Score,
                 MatchedTags = x.MatchedTags,
                 CreatedAt = x.Entry.CreatedAt,
-            })
-            .ToList();
+            }).ToList();
 
-        return Ok(recommendations);
+        return Ok(result);
     }
 
-    // GET global recommendations based on most used tags
     [HttpGet]
     public async Task<IActionResult> GetGlobal()
     {
-        var allEntries = (await _entryRepo.GetByUserIdAsync(CurrentUserId)).ToList();
+        var allEntries = (await _entryRepo.ListAsync(
+            new EntriesByUserSpec(CurrentUserId))).ToList();
 
-        // Find top tags
         var topTags = allEntries
             .SelectMany(e => e.Tags.Select(t => t.Name))
             .GroupBy(t => t)
@@ -81,16 +75,14 @@ public class RecommendationsController : ControllerBase
             .Select(g => g.Key)
             .ToHashSet();
 
-        if (!topTags.Any())
-            return Ok(new List<RecommendationDto>());
+        if (!topTags.Any()) return Ok(new List<RecommendationDto>());
 
-        // Recommend unread entries that match top tags
-        var recommendations = allEntries
+        var result = allEntries
             .Where(e => !e.IsRead)
             .Select(e =>
             {
-                var entryTags = e.Tags.Select(t => t.Name).ToHashSet();
-                var matched = topTags.Intersect(entryTags).ToList();
+                var matched = topTags
+                    .Intersect(e.Tags.Select(t => t.Name)).ToList();
                 return new { Entry = e, MatchedTags = matched, Score = matched.Count };
             })
             .Where(x => x.Score > 0)
@@ -107,9 +99,8 @@ public class RecommendationsController : ControllerBase
                 MatchScore = x.Score,
                 MatchedTags = x.MatchedTags,
                 CreatedAt = x.Entry.CreatedAt,
-            })
-            .ToList();
+            }).ToList();
 
-        return Ok(recommendations);
+        return Ok(result);
     }
 }

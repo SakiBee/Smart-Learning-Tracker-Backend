@@ -18,10 +18,6 @@ public static class DependencyInjection
         services.AddDbContext<AppDbContext>(options =>
             options.UseNpgsql(configuration.GetConnectionString("DefaultConnection")));
 
-        // Repositories
-        services.AddScoped<ILearningEntryRepository, LearningEntryRepository>();
-        services.AddScoped<IUserRepository, UserRepository>();
-
         // Auth
         services.AddScoped<IJwtTokenService, JwtTokenService>();
 
@@ -50,10 +46,7 @@ public static class DependencyInjection
         // AI Services
         services.AddScoped<IContentExtractorService, ContentExtractorService>();
         services.AddScoped<IAiSummaryService, AiSummaryService>();
-        services.AddScoped<IFlashcardRepository, FlashcardRepository>();
         services.AddScoped<IFlashcardGeneratorService, FlashcardGeneratorService>();
-        services.AddScoped<ICollectionRepository, CollectionRepository>();
-        services.AddScoped<IQuoteRepository, QuoteRepository>();
         return services;
     }
 }
